@@ -1,0 +1,245 @@
+# 🚀 アプローチB：Google Apps Script (GAS) 連携プログラム
+
+このドキュメントは、Makeを使わず、Google Apps Scriptを書いて「Googleフォーム入力 → OpenAI → WordPress（下書き）」の完全無料な自動連携システムを構築する手順とコードです。
+
+---
+
+## 📋 事前準備
+1. **OpenAI APIキー**の発行（`sk-...`）
+2. **WordPressのアプリケーションパスワード**の発行
+※取得方法は「Make構築マニュアル」と同じです。
+
+---
+
+## 🛠️ Step 1. Googleスプレッドシートの準備
+Googleフォームの回答は、スプレッドシートに保存されるようにしてください。
+
+1. 以下の質問項目でGoogleフォームを作ります。
+   * (A列: タイムスタンプ) *※自動付与*
+   * B列: イベント名
+   * C列: 開催日時
+   * D列: 開催場所
+   * E列: ターゲット層
+   * F列: アピールポイント
+   * G列: 画像生成のヒント
+2. フォームの「回答」タブから「スプレッドシートにリンク」を押し、新しいシートを作成します。
+3. 作成されたスプレッドシートのメニューから **「拡張機能」>「Apps Script」** をクリックします。
+
+---
+
+## 💻 Step 2. スクリプトの貼り付け
+開いたApps Scriptエディタ（おそらく「コード.gs」と表示されます）の元のコードをすべて消し、以下のコードをコピペします。
+
+```javascript
+// ==========================================
+// ⚙️ 設定エリア（あなたの環境に合わせて書き換えてください）
+// ==========================================
+const OPENAI_API_KEY = "sk-***********************************"; // OpenAIのAPIキー
+const WP_URL = "https://your-domain.com"; // WordPressのURL（末尾のスラッシュなし）
+const WP_USER = "admin"; // WordPressのログインユーザー名
+const WP_APP_PASS = "xxxx xxxx xxxx xxxx xxxx xxxx"; // 発行したアプリケーションパスワード
+
+// ==========================================
+// 🚀 トリガー関数：フォーム送信時に動くメイン処理
+// ==========================================
+function onFormSubmit(e) {
+  try {
+    // フォームの回答を取得
+    // ※e.namedValuesはフォームの質問タイトルがキーになります。一致しない場合は適宜修正してください。
+    const eventName = e.namedValues['イベント名'] ? e.namedValues['イベント名'][0] : '名称未設定';
+    const eventDateTime = e.namedValues['開催日時'] ? e.namedValues['開催日時'][0] : '';
+    const eventLocation = e.namedValues['開催場所'] ? e.namedValues['開催場所'][0] : '';
+    const targetAudience = e.namedValues['ターゲット層'] ? e.namedValues['ターゲット層'][0] : '';
+    const appealPoints = e.namedValues['アピールポイント'] ? e.namedValues['アピールポイント'][0] : '';
+    const imageHint = e.namedValues['画像生成のヒント'] ? e.namedValues['画像生成のヒント'][0] : '';
+
+    // 1. OpenAI (Text) でブログ記事の文章を作成
+    const contentHtml = generateBlogText(eventName, eventDateTime, eventLocation, targetAudience, appealPoints);
+    Logger.log("文章生成完了");
+
+    // 2. OpenAI (DALL-E 3) で画像を生成しURLを取得
+    const imageUrl = generateImage(imageHint, targetAudience);
+    Logger.log("画像生成完了");
+
+    if (!contentHtml || !imageUrl) {
+      throw new Error("AI生成に失敗しました。");
+    }
+
+    // 3. 画像をWordPressのメディアにアップロードしてIDを取得
+    const mediaId = uploadImageToWordPress(imageUrl);
+    Logger.log("画像アップロード完了: Media ID " + mediaId);
+
+    // 4. WordPressに記事を下書き投稿する
+    const postId = createWordPressDraft(eventName, contentHtml, mediaId);
+    Logger.log("WP下書き作成完了: Post ID " + postId);
+
+  } catch (error) {
+    Logger.log("【エラー発生】" + error.message);
+  }
+}
+
+// ------------------------------------------
+// 📝 AIで文章を生成する関数
+// ------------------------------------------
+function generateBlogText(eventName, eventDateTime, eventLocation, targetAudience, appealPoints) {
+  const url = "https://api.openai.com/v1/chat/completions";
+  const systemPrompt = "あなたは工務店のプロのWebマーケター・ライターです。入力された情報をもとに、モデルハウス見学会の集客用ブログ記事（HTML形式）を作成してください。SEOを意識した魅力的な見出し構成（H2, H3）を含め、ターゲットに刺さる温かみのあるトーンで書いてください。```html などのコードブロック記法は絶対に含めず、純粋なHTMLだけを出力してください。";
+  const userPrompt = `以下のイベント情報を元に記事を作成してください。
+・イベント名：${eventName}
+・開催日時：${eventDateTime}
+・場所：${eventLocation}
+・ターゲット：${targetAudience}
+・アピールポイント：${appealPoints}`;
+
+  const payload = {
+    "model": "gpt-4o",
+    "messages": [
+      {"role": "system", "content": systemPrompt},
+      {"role": "user", "content": userPrompt}
+    ]
+  };
+
+  const options = {
+    "method": "post",
+    "headers": {
+      "Authorization": "Bearer " + OPENAI_API_KEY,
+      "Content-Type": "application/json"
+    },
+    "payload": JSON.stringify(payload),
+    "muteHttpExceptions": true
+  };
+
+  const response = UrlFetchApp.fetch(url, options);
+  const json = JSON.parse(response.getContentText());
+  if (json.error) {
+    Logger.log("OpenAIエラー(Text): " + json.error.message);
+    return null;
+  }
+  return json.choices[0].message.content;
+}
+
+// ------------------------------------------
+// 🖼 AIで画像を生成する関数
+// ------------------------------------------
+function generateImage(imageHint, targetAudience) {
+  const url = "https://api.openai.com/v1/images/generations";
+  const prompt = `工務店のモデルハウスの高品質なインテリア写真。文字（テキスト）は一切含めないでください。「${imageHint}」の特徴を持つ、日本の住宅の美しい内観。明るく、清潔感があり、${targetAudience}が憧れるような雰囲気の写真。`;
+
+  const payload = {
+    "model": "dall-e-3",
+    "prompt": prompt,
+    "n": 1,
+    "size": "1024x1024",
+    "response_format": "url"
+  };
+
+  const options = {
+    "method": "post",
+    "headers": {
+      "Authorization": "Bearer " + OPENAI_API_KEY,
+      "Content-Type": "application/json"
+    },
+    "payload": JSON.stringify(payload),
+    "muteHttpExceptions": true
+  };
+
+  const response = UrlFetchApp.fetch(url, options);
+  const json = JSON.parse(response.getContentText());
+  if (json.error) {
+    Logger.log("OpenAIエラー(Image): " + json.error.message);
+    return null;
+  }
+  return json.data[0].url;
+}
+
+// ------------------------------------------
+// 📤 WordPressに画像をアップロードする関数
+// ------------------------------------------
+function uploadImageToWordPress(imageUrl) {
+  // 画像データを取得
+  const imageResponse = UrlFetchApp.fetch(imageUrl);
+  const imageBlob = imageResponse.getBlob();
+  // 適当なファイル名を付与
+  const fileName = "modelhouse-" + Utilities.formatDate(new Date(), "JST", "yyyyMMdd-HHmmss") + ".png";
+  imageBlob.setName(fileName);
+
+  const authString = Utilities.base64Encode(WP_USER + ":" + WP_APP_PASS);
+  const endpoint = WP_URL + "/wp-json/wp/v2/media";
+  
+  const options = {
+    "method": "post",
+    "headers": {
+      "Authorization": "Basic " + authString,
+      "Content-Disposition": `attachment; filename="${fileName}"`,
+      "Content-Type": "image/png" // URLから推測するか固定
+    },
+    "payload": imageBlob,
+    "muteHttpExceptions": true
+  };
+
+  const response = UrlFetchApp.fetch(endpoint, options);
+  const json = JSON.parse(response.getContentText());
+  if (json.id) {
+    return json.id; // 画像のIDを返す
+  } else {
+    Logger.log("WPメディアアップロードエラー: " + response.getContentText());
+    return null;
+  }
+}
+
+// ------------------------------------------
+// 📝 WordPressに下書き記事を作成する関数
+// ------------------------------------------
+function createWordPressDraft(title, content, mediaId) {
+  const authString = Utilities.base64Encode(WP_USER + ":" + WP_APP_PASS);
+  const endpoint = WP_URL + "/wp-json/wp/v2/posts";
+
+  const payload = {
+    "title": title,
+    "content": content,
+    "status": "draft", // 必ず下書き
+  };
+  
+  if (mediaId) {
+    payload["featured_media"] = mediaId; // アイキャッチ画像として設定
+  }
+
+  const options = {
+    "method": "post",
+    "headers": {
+      "Authorization": "Basic " + authString,
+      "Content-Type": "application/json"
+    },
+    "payload": JSON.stringify(payload),
+    "muteHttpExceptions": true
+  };
+
+  const response = UrlFetchApp.fetch(endpoint, options);
+  const json = JSON.parse(response.getContentText());
+  if (json.id) {
+    return json.id;
+  } else {
+    Logger.log("WP記事投稿エラー: " + response.getContentText());
+    return null;
+  }
+}
+```
+
+---
+
+## ⏰ Step 3. 必要な箇所の変更とトリガー設定
+1. コードの上部にある **「⚙️ 設定エリア」の4行** を、ご自身のキーやURLなどに書き換えます。
+2. 画面上の「💾 保存」アイコン（または Ctrl+S / Cmd+S）を押して保存します。
+3. エディタの左メニューにある **「時計マーク（トリガー）」** をクリックします。
+4. 右下の **「トリガーを追加」** をクリックし、以下のように設定して保存します。
+   * 実行する関数: `onFormSubmit`
+   * 実行するデプロイ: `Head`
+   * イベントのソース: `スプレッドシートから`
+   * イベントの種類: `フォーム送信時`
+5. 設定時にGoogleから「承認が必要です」という画面が出るので、「詳細を表示」→「安全ではないページに移動」から許可（Allow）してください。
+
+---
+
+## ✅ 動作テスト
+Googleフォームにテスト入力をして送信してみてください。
+数分後、WordPressの投稿画面に新しい「下書き」が保存されていれば連携成功です！
