@@ -1,0 +1,17 @@
+# セキュリティ保護：パスワードが書かれた設定ファイルは絶対にGitに含めない
+.env
+
+# 仮想環境
+venv/
+env/
+.venv/
+
+# Pythonのキャッシュファイル
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# その他一時ファイル
+.DS_Store
+*.log
